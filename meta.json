@@ -4,6 +4,13 @@
   "visibility": "public",
   "url": "https://github.com/clintpurser/door-monitor",
   "description": "Modular sensor component: door-monitor",
+  "models": [
+    {
+      "api": "rdk:component:sensor",
+      "model": "clint:door-monitor:door-monitor",
+      "markdown_link": "clint_door-monitor_door-monitor.md"
+    }
+  ],
   "applications": null,
   "markdown_link": "README.md",
   "entrypoint": "bin/door-monitor",
