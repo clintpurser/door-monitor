@@ -3,7 +3,7 @@
   "module_id": "clint:door-monitor",
   "visibility": "public",
   "url": "https://github.com/clintpurser/door-monitor",
-  "description": "Modular generic service: door-monitor",
+  "description": "Modular sensor component: door-monitor",
   "applications": null,
   "markdown_link": "README.md",
   "entrypoint": "bin/door-monitor",

@@ -1,6 +1,6 @@
 # Model clint:door-monitor:door-monitor
 
-The **Door Monitor** module tracks the state of a door (Open/Closed) using a reed switch connected to a Board component's GPIO pin. It provides visual feedback via status lights (Green/Yellow/Red) and logs usage data to the Viam Data Manager.
+The **Door Monitor** is a sensor component that tracks the state of a door (Open/Closed) using a reed switch connected to a Board component's GPIO pin. It provides visual feedback via status lights (Green/Yellow/Red) and exposes door state through the standard sensor `Readings` API for use with the Viam Data Manager.
 
 ## Features
 
@@ -9,12 +9,12 @@ The **Door Monitor** module tracks the state of a door (Open/Closed) using a ree
   - **Green**: Door Closed.
   - **Yellow**: Door Open (normal duration).
   - **Red**: Door Open too long (Warning).
-- **Data Logging**: Automatically captures tabular data events when the door opens and closes.
-- **Status API**: `DoCommand` returns real-time status and duration.
+- **Sensor Readings**: Implements the standard `sensor.Readings` API, returning door state, open duration, and warning status.
+- **Smart Data Capture**: When the door is closed, returns `ErrNoCaptureToStore` (gRPC `FailedPrecondition`) after the first reading, so the Data Manager only stores data when something interesting is happening.
 
 ## Configuration
 
-Add the `door-monitor` component to your machine configuration.
+Add the `door-monitor` sensor to your machine configuration.
 
 ### Attributes
 
@@ -34,8 +34,9 @@ Add the `door-monitor` component to your machine configuration.
 {
   "name": "my-door-monitor",
   "model": "clint:door-monitor:door-monitor",
-  "type": "component",
-  "details": {
+  "type": "sensor",
+  "namespace": "rdk",
+  "attributes": {
     "board_name": "local-board",
     "sensor_pin": "8",
     "sensor_type": "NO",
@@ -43,35 +44,37 @@ Add the `door-monitor` component to your machine configuration.
     "yellow_light_pin": "12",
     "red_light_pin": "16",
     "warning_time": 60
-  }
+  },
+  "depends_on": ["local-board"]
 }
 ```
 
-## Data Capturing
+## Readings
 
-The module integrates with the **Viam Data Manager**.
+The `Readings` method returns the current door state. Configure the **Data Manager** service to capture from this sensor at your desired interval.
 
-- It triggers a data capture **when the door opens** and **when the door closes**.
-- Ensure a **Data Manager** service is configured on your machine to collect these events.
-
-## DoCommand
-
-You can query the current status of the door monitor using `DoCommand`.
-
-### Command: `status`
-
-Input:
-
-```json
-{ "command": "status" }
-```
-
-Output:
+### Response
 
 ```json
 {
-  "state": "open", // "open" or "closed"
-  "open_time": 15.5, // Duration in seconds if open (or duration of last open if closed)
-  "is_warning": false // True if open longer than warning_time
+  "state": "open",
+  "open_time": 15.5,
+  "is_warning": false
 }
 ```
+
+| Field        | Type   | Description                                               |
+| ------------ | ------ | --------------------------------------------------------- |
+| `state`      | string | `"open"` or `"closed"`                                    |
+| `open_time`  | float  | Seconds the door has been (or was) open                   |
+| `is_warning` | bool   | `true` if open duration exceeds `warning_time`            |
+
+## Data Capture Behavior
+
+This sensor is designed to work with the **Viam Data Manager** and uses smart filtering to avoid storing redundant data:
+
+1. **Door opens** — `Readings` returns data on every capture cycle (state, duration, warning status).
+2. **Door closes** — The first `Readings` call returns the final state with the total open duration.
+3. **Door stays closed** — Subsequent `Readings` calls return a gRPC `FailedPrecondition` error (`ErrNoCaptureToStore`), signaling the Data Manager to skip storage until the next event.
+
+This means data is only stored when the door is open or on the transition to closed, keeping your dataset focused on meaningful events.

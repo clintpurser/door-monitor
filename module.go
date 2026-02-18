@@ -4,15 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-
 	"sync"
 	"time"
 
 	"go.viam.com/rdk/components/board"
+	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/services/datamanager"
-	generic "go.viam.com/rdk/services/generic"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 var (
@@ -22,8 +22,8 @@ var (
 )
 
 func init() {
-	resource.RegisterService(generic.API, DoorMonitor,
-		resource.Registration[resource.Resource, *Config]{
+	resource.RegisterComponent(sensor.API, DoorMonitor,
+		resource.Registration[sensor.Sensor, *Config]{
 			Constructor: newDoorMonitorDoorMonitor,
 		},
 	)
@@ -76,21 +76,22 @@ type doorMonitorDoorMonitor struct {
 	cancelCtx  context.Context
 	cancelFunc func()
 
-	board      board.Board
-	dataClient datamanager.Service
+	board board.Board
 
 	sensorPin   board.GPIOPin
 	greenLight  board.GPIOPin
 	yellowLight board.GPIOPin
 	redLight    board.GPIOPin
 
-	mu          sync.Mutex
-	doorState   string    // "open" or "closed"
-	openTime    time.Time // When the door opened
-	lastWarning time.Time
+	mu               sync.Mutex
+	doorState        string    // "open" or "closed"
+	openTime         time.Time // When the door opened
+	lastWarning      time.Time
+	closedReported   bool    // Whether we've reported the closed state to data manager
+	lastOpenDuration float64 // Duration the door was open (set on close)
 }
 
-func newDoorMonitorDoorMonitor(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (resource.Resource, error) {
+func newDoorMonitorDoorMonitor(ctx context.Context, deps resource.Dependencies, rawConf resource.Config, logger logging.Logger) (sensor.Sensor, error) {
 	conf, err := resource.NativeConfig[*Config](rawConf)
 	if err != nil {
 		return nil, err
@@ -100,42 +101,11 @@ func newDoorMonitorDoorMonitor(ctx context.Context, deps resource.Dependencies, 
 
 }
 
-func NewDoorMonitor(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (resource.Resource, error) {
+func NewDoorMonitor(ctx context.Context, deps resource.Dependencies, name resource.Name, conf *Config, logger logging.Logger) (sensor.Sensor, error) {
 	b, err := board.FromDependencies(deps, conf.BoardName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get board %q: %w", conf.BoardName, err)
 	}
-
-	// We can't easily get the Data Service from dependencies by name if it's a built-in service usually.
-	// But usually it's passed in dependencies if listed in config?
-	// Actually for Viam 0.x, Data service is often available via the Robot client, but here we are IN a module.
-	// Validated dependencies are passed in `deps`.
-	// We will look for a data service.
-	// NOTE: The user said "requires a Data service". We'll assume one is available or we might need to look it up.
-	// Often modules don't directly depend on Data service unless explicitly configured.
-	// For now, let's assume we proceed without explicit Data dependency lookup here OR we need to add it to Config if it's a specific named service.
-	// However, the standard Viam Data Service is a singleton usually.
-	// Let's assume we need to look it up from dependencies if the user put it in "depends_on" or similar implicit config.
-	// But `Validate` returned `cfg.BoardName`. We didn't return a data service name.
-	// Let's rely on standard data service lookup if possible, or maybe the user needs to provide its name?
-	// The user prompt said: "I assume in the service config we'll need to pass in the board name...".
-	// It didn't explicitly say "data service name".
-	// Let's check `deps.Lookup(data.API)`?
-
-	// Implementation Strategy:
-	// We'll search deps for a Data Manager Service.
-	var finalDataClient datamanager.Service
-	// Iterate deps to find one.
-	for _, r := range deps {
-		if ds, ok := r.(datamanager.Service); ok {
-			finalDataClient = ds
-			break
-		}
-	}
-
-	// If not found in deps, user might need to add it to config.
-	// For now, if missing, we will log a warning and run without data upload (or error? User wants data upload).
-	// Let's error if strictly required, but maybe safe reference.
 
 	cancelCtx, cancelFunc := context.WithCancel(context.Background())
 
@@ -146,8 +116,7 @@ func NewDoorMonitor(ctx context.Context, deps resource.Dependencies, name resour
 		cancelCtx:  cancelCtx,
 		cancelFunc: cancelFunc,
 		board:      b,
-		dataClient: finalDataClient,
-		doorState:  "closed", // Default assumption
+		doorState:  "closed",
 	}
 
 	if err := s.configurePins(ctx); err != nil {
@@ -288,10 +257,10 @@ func (s *doorMonitorDoorMonitor) monitorLoop() {
 			s.doorState = "open"
 			s.openTime = time.Now()
 			s.lastWarning = time.Time{} // Reset warning
+			s.closedReported = false
 			s.mu.Unlock()
 
 			s.logger.Info("Door Opened")
-			s.postData(s.cancelCtx, "opened", 0)
 
 		} else {
 			// Still Open
@@ -326,12 +295,12 @@ func (s *doorMonitorDoorMonitor) monitorLoop() {
 			s.mu.Lock()
 			duration := time.Since(s.openTime).Seconds()
 			s.doorState = "closed"
+			s.lastOpenDuration = duration
+			s.closedReported = false
 			s.mu.Unlock()
 
 			s.logger.Info("Door Closed", "duration", duration)
 			s.setLights(true, false, false) // Green
-
-			s.postData(s.cancelCtx, "closed", duration)
 		} else {
 			// Still Closed
 			// Ensure Green is on (idempotent-ish)
@@ -358,17 +327,24 @@ func (s *doorMonitorDoorMonitor) setLights(green, yellow, red bool) {
 	}
 }
 
-// GetReadings allows the Data Manager to capture the current state of the door.
-func (s *doorMonitorDoorMonitor) GetReadings(ctx context.Context, extra map[string]interface{}) (map[string]interface{}, error) {
+// Readings implements sensor.Sensor. Data manager calls this to capture door state.
+// When the door is closed and we've already reported it once, we return
+// ErrNoCaptureToStore (gRPC FailedPrecondition) to signal there's no new data worth storing.
+func (s *doorMonitorDoorMonitor) Readings(ctx context.Context, extra map[string]interface{}) (map[string]interface{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if s.doorState == "closed" && s.closedReported {
+		return nil, status.Error(codes.FailedPrecondition, "no capture to store")
+	}
 
 	duration := 0.0
 	if s.doorState == "open" {
 		duration = time.Since(s.openTime).Seconds()
-	} else if s.openTime.IsZero() == false {
-		// If closed, and we just verified it closed, we could store last duration?
-		// But s.doorState is closed.
+	} else {
+		// Door just closed — report the final open duration once
+		duration = s.lastOpenDuration
+		s.closedReported = true
 	}
 
 	return map[string]interface{}{
@@ -385,34 +361,13 @@ func (s *doorMonitorDoorMonitor) checkWarning(duration float64) bool {
 	return duration > float64(s.cfg.WarningTime)
 }
 
-func (s *doorMonitorDoorMonitor) postData(ctx context.Context, status string, duration float64) {
-	if s.dataClient == nil {
-		return
-	}
-	// Trigger Sync on the Data Manager.
-	// This forces a data capture cycle on the robot.
-	// If this resource (s.name) is configured to be captured generally, it will be.
-	// Sync usually returns the sync ID or error.
-	// Sync usually returns error.
-	err := s.dataClient.Sync(ctx, nil)
-	if err != nil {
-		s.logger.Errorw("failed to sync data", "error", err)
-	}
-}
-
 func (s *doorMonitorDoorMonitor) Name() resource.Name {
 
 	return s.name
 }
 
 func (s *doorMonitorDoorMonitor) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	if v, ok := cmd["command"]; ok && v == "status" {
-		readings, err := s.GetReadings(ctx, nil)
-		return readings, err
-	}
-	// Return status by default
-	readings, err := s.GetReadings(ctx, nil)
-	return readings, err
+	return nil, errUnimplemented
 }
 
 func (s *doorMonitorDoorMonitor) Close(context.Context) error {

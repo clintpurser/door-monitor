@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"doormonitor"
+	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
-	generic "go.viam.com/rdk/services/generic"
 )
 
 func main() {
@@ -24,7 +24,7 @@ func realMain() error {
 
 	cfg := doormonitor.Config{}
 
-	thing, err := doormonitor.NewDoorMonitor(ctx, deps, generic.Named("foo"), &cfg, logger)
+	thing, err := doormonitor.NewDoorMonitor(ctx, deps, sensor.Named("foo"), &cfg, logger)
 	if err != nil {
 		return err
 	}
