@@ -334,7 +334,8 @@ func (s *doorMonitorDoorMonitor) Readings(ctx context.Context, extra map[string]
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.doorState == "closed" && s.closedReported {
+	fromDM, _ := extra["fromDataManagement"].(bool)
+	if fromDM && s.doorState == "closed" && s.closedReported {
 		return nil, status.Error(codes.FailedPrecondition, "no capture to store")
 	}
 
