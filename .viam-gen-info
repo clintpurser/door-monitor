@@ -1,0 +1,13 @@
+{
+  "module_name": "door-monitor",
+  "visibility": "public",
+  "namespace": "clint",
+  "language": "go",
+  "resource_type": "service",
+  "resource_subtype": "generic",
+  "model_name": "door-monitor",
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2026-02-18T14:59:01.507535Z",
+  "module_readme_link": "README.md"
+}
