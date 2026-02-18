@@ -342,13 +342,19 @@ func (s *doorMonitorDoorMonitor) monitorLoop() {
 
 func (s *doorMonitorDoorMonitor) setLights(green, yellow, red bool) {
 	if s.greenLight != nil {
-		s.greenLight.Set(context.Background(), green, nil)
+		if err := s.greenLight.Set(context.Background(), green, nil); err != nil {
+			s.logger.Errorw("failed to set green light", "error", err)
+		}
 	}
 	if s.yellowLight != nil {
-		s.yellowLight.Set(context.Background(), yellow, nil)
+		if err := s.yellowLight.Set(context.Background(), yellow, nil); err != nil {
+			s.logger.Errorw("failed to set yellow light", "error", err)
+		}
 	}
 	if s.redLight != nil {
-		s.redLight.Set(context.Background(), red, nil)
+		if err := s.redLight.Set(context.Background(), red, nil); err != nil {
+			s.logger.Errorw("failed to set red light", "error", err)
+		}
 	}
 }
 
