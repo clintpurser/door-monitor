@@ -203,7 +203,7 @@ func (s *doorMonitorDoorMonitor) configurePins(ctx context.Context) error {
 
 func (s *doorMonitorDoorMonitor) startPolling() {
 	go func() {
-		ticker := time.NewTicker(500 * time.Millisecond)
+		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			select {
